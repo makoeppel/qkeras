@@ -34,10 +34,15 @@ from . import quantizer_registry
 # from .google_internals.experimental_quantizers import quantized_bits_learnable_scale
 from .safe_eval import safe_eval
 from tensorflow.python.framework import smart_cond as tf_utils
+from tensorflow.python.keras.backend import symbolic_learning_phase
 
 #
 # Library of auxiliary functions
 #
+
+def cast_to_floatx(value):
+    dtype = tf.keras.backend.floatx()
+    return tf.cast(value, dtype)
 
 
 def get_weight_scale(quantizer, x=None):
@@ -638,7 +643,7 @@ def _round_through(x, use_stochastic_rounding=False, precision=0.5):
   """
   if use_stochastic_rounding:
     output = tf_utils.smart_cond(
-        K.learning_phase(),
+        symbolic_learning_phase(),
         lambda: x + tf.stop_gradient(-x + stochastic_round(x, precision)),
         lambda: x + tf.stop_gradient(-x + tf.round(x)))
   else:
@@ -952,14 +957,14 @@ class quantized_linear(base_quantizer.BaseQuantizer):
     """Get bounds of clip range"""
 
     if self.use_sign_function:
-      clip_min = K.cast_to_floatx(-0.5)
-      clip_max = K.cast_to_floatx(0.5)
+      clip_min = cast_to_floatx(-0.5)
+      clip_max = cast_to_floatx(0.5)
     else:
       unsigned_bits_po2 = K.pow(2.0, self.bits - self.keep_negative)
       # if symmetric, clip_min is negative of clip_max. Otherwise clip_min is
       # lowered by 1, giving us one more representable number
       clip_min = self.keep_negative * (-unsigned_bits_po2 + self.symmetric)
-      clip_max = unsigned_bits_po2 - K.cast_to_floatx(1.0)
+      clip_max = unsigned_bits_po2 - cast_to_floatx(1.0)
 
     return clip_min, clip_max
 
@@ -970,7 +975,7 @@ class quantized_linear(base_quantizer.BaseQuantizer):
     self._build()
 
     # Data type conversion
-    x = K.cast_to_floatx(x)
+    x = cast_to_floatx(x)
     shape = x.shape
 
     if self.auto_alpha:
@@ -1115,13 +1120,13 @@ class quantized_linear(base_quantizer.BaseQuantizer):
     }."""
 
     if self.use_sign_function:
-      return K.cast_to_floatx([self.max(), self.min()])
+      return cast_to_floatx([self.max(), self.min()])
     else:
       clip_min, clip_max = self.get_clip_bounds()
       clip_max = tf.cast(clip_max, tf.int32)
       clip_min = tf.cast(clip_min, tf.int32)
-      pos_array = K.cast_to_floatx(tf.range(clip_max + 1))
-      neg_array = K.cast_to_floatx(tf.range(clip_min, 0))
+      pos_array = cast_to_floatx(tf.range(clip_max + 1))
+      neg_array = cast_to_floatx(tf.range(clip_min, 0))
 
       return self.quantization_scale * tf.concat([pos_array, neg_array], axis=0)
 
@@ -1301,7 +1306,7 @@ class quantized_bits(base_quantizer.BaseQuantizer):  # pylint: disable=invalid-n
     if not self.built:
       self.build(var_name=self.var_name, use_variables=self.use_variables)
 
-    x = K.cast_to_floatx(x)
+    x = cast_to_floatx(x)
 
     # quantized_bits with "1" bit becomes a binary implementation.
     unsigned_bits = self.bits - self.keep_negative
@@ -1310,8 +1315,8 @@ class quantized_bits(base_quantizer.BaseQuantizer):  # pylint: disable=invalid-n
     # float32 has a much larger value range (2^128) than int32 (2^32), this is
     # particularly important when quantizing very large values, and when integer
     # bits are set much larger than total bits.
-    m = K.pow(2.0, K.cast_to_floatx(unsigned_bits))
-    m_i = K.pow(2.0, K.cast_to_floatx(self.integer))
+    m = K.pow(2.0, cast_to_floatx(unsigned_bits))
+    m_i = K.pow(2.0, cast_to_floatx(self.integer))
 
     # Verify that "elements_per_scale", "min_po2_exponent",
     # and "max_po2_exponent" are only set when alpha is "auto_po2"
@@ -1870,7 +1875,7 @@ class stochastic_ternary(ternary):  # pylint: disable=invalid-name
       return x + tf.stop_gradient(-x + scale * q)
 
     output = tf_utils.smart_cond(
-        K.learning_phase(), stochastic_output, lambda: ternary.__call__(self, x)
+        symbolic_learning_phase(), stochastic_output, lambda: ternary.__call__(self, x)
     )
     return output
 
@@ -2042,7 +2047,7 @@ class binary(base_quantizer.BaseQuantizer):  # pylint: disable=invalid-name
       f = 2 * m
 
       x = tf_utils.smart_cond(
-          K.learning_phase(),
+          symbolic_learning_phase(),
           lambda: f * _round_through(
               x / f, use_stochastic_rounding=True, precision=0.125),
           lambda: x)
@@ -2051,7 +2056,7 @@ class binary(base_quantizer.BaseQuantizer):  # pylint: disable=invalid-name
     if self.use_stochastic_rounding:
       # in inference, we use a biased "1" for stochastic rounding right now
       k_sign += (1.0 - tf.abs(k_sign)) * tf_utils.smart_cond(
-          K.learning_phase(),
+          symbolic_learning_phase(),
           lambda: 2.0 * tf.round(tf.random.uniform(tf.shape(x))) - 1.0,
           lambda: tf.ones_like(tf.shape(x), dtype=K.floatx()))
       # if something still remains, just make it positive for now.
@@ -2179,7 +2184,7 @@ class stochastic_binary(binary):  # pylint: disable=invalid-name
       return x + tf.stop_gradient(-x + scale * q)
 
     output = tf_utils.smart_cond(
-        K.learning_phase(), stochastic_output, lambda: binary.__call__(self, x)
+        symbolic_learning_phase(), stochastic_output, lambda: binary.__call__(self, x)
     )
     return output
 
@@ -2550,8 +2555,8 @@ class quantized_tanh(base_quantizer.BaseQuantizer):  # pylint: disable=invalid-n
 
   def __call__(self, x):
     non_sign_bits = self.bits - 1
-    x = K.cast_to_floatx(x)
-    m = K.cast_to_floatx(K.pow(2, non_sign_bits))
+    x = cast_to_floatx(x)
+    m = cast_to_floatx(K.pow(2, non_sign_bits))
     p = K.tanh(x) if self.use_real_tanh else 2.0 * _sigmoid(x) - 1.0
     return tf.keras.backend.clip(
                                  (_round_through(p * m, self.use_stochastic_rounding) / m),
@@ -2615,8 +2620,8 @@ class quantized_sigmoid(base_quantizer.BaseQuantizer):  # pylint: disable=invali
     return "quantized_sigmoid(" + ",".join(flags) + ")"
 
   def __call__(self, x):
-    x = K.cast_to_floatx(x)
-    m = K.cast_to_floatx(K.pow(2, self.bits))
+    x = cast_to_floatx(x)
+    m = cast_to_floatx(K.pow(2, self.bits))
 
     p = K.sigmoid(x) if self.use_real_sigmoid else _sigmoid(x)
 
@@ -2700,7 +2705,7 @@ def _clip_power_of_two(x_abs,
       x_log2 = _floor_through(tf.keras.backend.log(x_input) / log2)
     elif use_stochastic_rounding:
       x_log2 = tf_utils.smart_cond(
-          K.learning_phase(),
+          symbolic_learning_phase(),
           lambda: stochastic_round_po2(x_input),
           lambda: _round_through(tf.keras.backend.log(x_input) / log2))
     else:
@@ -3196,7 +3201,7 @@ class quantized_hswish(quantized_bits):  # pylint: disable=invalid-name
     assert (
         self.relu_shift > 0
     ), f"relu_shift must be a positive value, found {self.relu_shift} instead"
-    x = K.cast_to_floatx(x)
+    x = cast_to_floatx(x)
     shift_x = x + self.relu_shift
     relu_x = tf.where(
         shift_x <= self.relu_upper_bound,
